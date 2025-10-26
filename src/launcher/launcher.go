@@ -409,10 +409,18 @@ func buildClasspath(gameDir, version string, versionJSON *VersionJSON, E *events
 // PrepareCMD prepares the Java executable path and command-line arguments required to launch Minecraft.
 // It handles argument construction, memory settings, and finding the main class.
 func PrepareCMD(
-	username, accessToken, uuid, gameDir, version, javaPath, maxRam, minRam string,
+	username string,
+	accessToken string,
+	uuid string,
+	gameDir string,
+	version string,
+	javaPath string,
+	maxRam string,
+	minRam string,
 	E *events.EventEmitter,
+	extraArgs ...string,
 ) (string, []string, error) {
-	// Apply default values if not provided
+	// Apply default values
 	if username == "" {
 		username = "Player"
 	}
@@ -426,7 +434,7 @@ func PrepareCMD(
 		minRam = "512M"
 	}
 	if accessToken == "" {
-		accessToken = "0" // Placeholder for offline mode
+		accessToken = "0"
 	}
 	if uuid == "" {
 		uuid = "00000000-0000-0000-0000-000000000000"
@@ -434,19 +442,18 @@ func PrepareCMD(
 
 	E.Emit("launch_preparation_start", version)
 
-	// Load and merge version JSON
+	// Load version JSON
 	versionJSON, err := loadVersionJSON(gameDir, version, E)
 	if err != nil {
 		E.Emit("error", err.Error())
 		return "", nil, err
 	}
-
 	E.Emit("version_json_loaded", versionJSON.ID)
 
 	versionDir := filepath.Join(gameDir, "versions", version)
 	versionJar := filepath.Join(versionDir, version+".jar")
 
-	// Check for the client JAR. If a modded version is used, fall back to the parent version's JAR.
+	// Check for jar or fallback
 	if _, err := os.Stat(versionJar); os.IsNotExist(err) {
 		if versionJSON.InheritsFrom != "" {
 			parentJar := filepath.Join(gameDir, "versions", versionJSON.InheritsFrom, versionJSON.InheritsFrom+".jar")
@@ -454,55 +461,55 @@ func PrepareCMD(
 				E.Emit("using_parent_jar", versionJSON.InheritsFrom)
 				versionJar = parentJar
 			} else {
-				E.Emit("error", "Neither version jar nor parent jar found")
-				return "", nil, fmt.Errorf("version jar not found: %s and parent jar not found: %s", versionJar, parentJar)
+				err := fmt.Errorf("version jar not found: %s and parent jar not found: %s", versionJar, parentJar)
+				E.Emit("error", err.Error())
+				return "", nil, err
 			}
 		} else {
-			E.Emit("error", "Version jar not found: "+versionJar)
-			return "", nil, fmt.Errorf("version jar not found: %s", versionJar)
+			err := fmt.Errorf("version jar not found: %s", versionJar)
+			E.Emit("error", err.Error())
+			return "", nil, err
 		}
 	}
 
-	// Extract natives from libraries
+	// Extract natives
 	nativesDir := filepath.Join(versionDir, "natives")
 	libDir := filepath.Join(gameDir, "libraries")
-
 	if err := extractNativesFromLibraries(libDir, nativesDir, E); err != nil {
 		E.Emit("error", "Failed to extract natives: "+err.Error())
-		return "", nil, fmt.Errorf("failed to extract natives: %w", err)
+		return "", nil, err
 	}
 
-	// Build the classpath
+	// Build classpath
 	E.Emit("building_classpath", libDir)
 	classpath := buildClasspath(gameDir, version, versionJSON, E)
 
-	// Get absolute path for natives directory, required for Java library path
 	absNativesDir, _ := filepath.Abs(nativesDir)
 
-	// Determine the asset index name
+	// Determine asset index
 	assetIndex := versionJSON.AssetIndex.ID
 	if versionJSON.Assets != "" {
 		assetIndex = versionJSON.Assets
 	}
 
-	// Build base JVM arguments
+	// Base JVM arguments
 	args := []string{
-		"-Xmx" + maxRam,                        // Maximum memory allocation
-		"-Xms" + minRam,                        // Initial memory allocation
-		"-Djava.library.path=" + absNativesDir, // Path to extracted native libraries
-		"-cp", classpath,                       // The constructed classpath
+		"-Xmx" + maxRam,
+		"-Xms" + minRam,
+		"-Djava.library.path=" + absNativesDir,
+		"-cp", classpath,
 	}
 
-	// Append main class
+	// Main class
 	mainClass := versionJSON.MainClass
 	if mainClass == "" {
-		mainClass = "net.minecraft.client.main.Main" // Vanilla fallback
+		mainClass = "net.minecraft.client.main.Main"
 	}
 	args = append(args, mainClass)
 
-	// Parse and append game arguments
+	// Game arguments
+	var gameArgs []string
 	if versionJSON.MinecraftArguments != "" {
-		// Old argument format (pre-1.13)
 		replacements := map[string]string{
 			"auth_player_name":  username,
 			"version_name":      version,
@@ -514,26 +521,9 @@ func PrepareCMD(
 			"user_properties":   "{}",
 			"user_type":         "legacy",
 		}
-		gameArgs := parseMinecraftArguments(versionJSON.MinecraftArguments, replacements)
-		args = append(args, gameArgs...)
-	} else if len(versionJSON.Arguments.Game) > 0 {
-		// New argument format (1.13+) - Full implementation is complex; a manual fallback is used.
-		// NOTE: The full logic for the new format (1.13+) including rules for Game and JVM arguments is complex
-		// and is not fully implemented in the provided code (marked with TODO). The following is a manual fallback.
-		fallBackArgs := []string{
-			"--username", username,
-			"--version", version,
-			"--gameDir", gameDir,
-			"--assetsDir", filepath.Join(gameDir, "assets"),
-			"--assetIndex", assetIndex,
-			"--uuid", uuid,
-			"--accessToken", accessToken,
-			"--userType", "legacy",
-		}
-		args = append(args, fallBackArgs...)
+		gameArgs = parseMinecraftArguments(versionJSON.MinecraftArguments, replacements)
 	} else {
-		// Generic manual fallback for any unparsed or missing argument format
-		fallBackArgs := []string{
+		gameArgs = []string{
 			"--username", username,
 			"--version", version,
 			"--gameDir", gameDir,
@@ -543,8 +533,10 @@ func PrepareCMD(
 			"--accessToken", accessToken,
 			"--userType", "legacy",
 		}
-		args = append(args, fallBackArgs...)
 	}
+
+	args = append(args, gameArgs...)
+	args = append(args, extraArgs...)
 
 	E.Emit("launch_preparation_complete", map[string]interface{}{
 		"username":  username,
