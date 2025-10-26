@@ -1,4 +1,4 @@
-# ⛏️ Minecraft Launcher Core (Go)
+#  Minecraft Launcher Core (Go)
 
 A **high-performance, modular, and thread-safe Go library** designed to abstract the complex logistics of downloading, managing, and launching various versions of the Minecraft client (Mojang API, libraries, assets, and mod loaders).
 
@@ -19,7 +19,7 @@ The library follows the **Single Responsibility Principle**, dividing its logic 
 
 ---
 
-## ⚙️ Core Logic Flow
+## Core Logic Flow
 
 The launch process involves two main phases: **Installation** (idempotent setup) and **Execution** (runtime command generation).
 
@@ -44,7 +44,7 @@ This phase builds the exact command required to start the JVM.
 
 ---
 
-## 📢 Eventing System (`events`)
+## Eventing System (`events`)
 
 The **`EventEmitter`** provides a clean, non-blocking interface for the core logic to communicate status and errors back to the UI or logging layer.
 
