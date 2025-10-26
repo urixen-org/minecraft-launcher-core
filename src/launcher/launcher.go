@@ -14,7 +14,8 @@ import (
 	"github.com/urixen-org/minecraft-launcher-core/src/events"
 )
 
-// VersionJSON represents the version metadata
+// VersionJSON represents the structure of the Minecraft version metadata JSON file.
+// This file contains all necessary information to launch a specific version, including libraries and arguments.
 type VersionJSON struct {
 	ID                     string `json:"id"`
 	Type                   string `json:"type"`
@@ -62,7 +63,8 @@ type VersionJSON struct {
 	} `json:"arguments"`
 }
 
-// extractJar extracts native files from a JAR to a destination directory
+// extractJar extracts native files (DLL, SO, DYLIB, JNILIB) from a JAR archive
+// into a flat destination directory. It skips files in META-INF/.
 func extractJar(jarPath, destDir string, E *events.EventEmitter) error {
 	r, err := zip.OpenReader(jarPath)
 	if err != nil {
@@ -71,17 +73,12 @@ func extractJar(jarPath, destDir string, E *events.EventEmitter) error {
 	defer r.Close()
 
 	for _, f := range r.File {
-		// Skip directories
-		if f.FileInfo().IsDir() {
+		// Skip directories and META-INF
+		if f.FileInfo().IsDir() || strings.HasPrefix(f.Name, "META-INF/") {
 			continue
 		}
 
-		// Skip META-INF
-		if strings.HasPrefix(f.Name, "META-INF/") {
-			continue
-		}
-
-		// Extract ALL files that look like natives (in any subdirectory)
+		// Check if the file is a native library based on its extension
 		name := strings.ToLower(f.Name)
 		isNative := strings.HasSuffix(name, ".dll") ||
 			strings.HasSuffix(name, ".so") ||
@@ -92,7 +89,7 @@ func extractJar(jarPath, destDir string, E *events.EventEmitter) error {
 			continue
 		}
 
-		// Extract to flat directory structure
+		// Extract to a flat directory structure (using only the filename)
 		destPath := filepath.Join(destDir, filepath.Base(f.Name))
 
 		// Skip if already exists
@@ -123,13 +120,14 @@ func extractJar(jarPath, destDir string, E *events.EventEmitter) error {
 	return nil
 }
 
-// shouldIncludeLibrary checks if a library should be included based on rules
+// shouldIncludeLibrary checks if a library should be included based on its OS rules defined in the version JSON.
 func shouldIncludeLibrary(rules []struct {
 	Action string `json:"action"`
 	OS     struct {
 		Name string `json:"name"`
 	} `json:"os"`
 }) bool {
+	// If no rules are defined, the library is always included.
 	if len(rules) == 0 {
 		return true
 	}
@@ -144,13 +142,15 @@ func shouldIncludeLibrary(rules []struct {
 			}
 		} else if rule.Action == "disallow" {
 			if rule.OS.Name == "" || rule.OS.Name == osName {
-				return false
+				return false // Disallow rules are absolute
 			}
 		}
 	}
+	// If there were rules, but none disallowed it, return true only if an allow rule matched.
 	return allowed
 }
 
+// getOSName returns the Minecraft-specific operating system name based on runtime.GOOS.
 func getOSName() string {
 	switch runtime.GOOS {
 	case "windows":
@@ -164,13 +164,14 @@ func getOSName() string {
 	}
 }
 
-// extractNativesFromLibraries extracts natives from all JARs in libraries
+// extractNativesFromLibraries recursively walks the libraries directory, identifies platform-specific
+// native JARs, and extracts their contents into the version's natives directory.
 func extractNativesFromLibraries(libDir, nativesDir string, E *events.EventEmitter) error {
 	if err := os.MkdirAll(nativesDir, 0o755); err != nil {
 		return err
 	}
 
-	// Check if natives already extracted
+	// Check for existing natives to skip extraction if already done
 	entries, err := os.ReadDir(nativesDir)
 	if err == nil && len(entries) > 0 {
 		for _, entry := range entries {
@@ -185,7 +186,7 @@ func extractNativesFromLibraries(libDir, nativesDir string, E *events.EventEmitt
 
 	E.Emit("extracting_natives_start", libDir)
 
-	// Platform detection
+	// Determine the platform pattern to match native JAR filenames
 	var nativePattern string
 	switch runtime.GOOS {
 	case "windows":
@@ -198,32 +199,25 @@ func extractNativesFromLibraries(libDir, nativesDir string, E *events.EventEmitt
 		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
 
-	// Extract from all JARs (walk recursively through subdirectories)
+	// Walk recursively and extract from matching JARs
 	filepath.Walk(libDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-
-		if info.IsDir() {
-			return nil
-		}
-
-		if !strings.HasSuffix(info.Name(), ".jar") {
+		if err != nil || info.IsDir() || !strings.HasSuffix(info.Name(), ".jar") {
 			return nil
 		}
 
 		lowerName := strings.ToLower(info.Name())
 
-		// Check if this JAR contains natives for our platform
+		// A JAR is considered a native JAR if it contains the platform-specific pattern or "natives"
 		if strings.Contains(lowerName, nativePattern) || strings.Contains(lowerName, "natives") {
 			E.Emit("native_jar_processing", info.Name())
+			// Ignore error from extractJar to continue processing other libraries
 			extractJar(path, nativesDir, E)
 		}
 
 		return nil
 	})
 
-	// Verify extraction
+	// Verify that at least one native file was extracted
 	entries, err = os.ReadDir(nativesDir)
 	if err != nil {
 		return fmt.Errorf("failed to read natives directory: %w", err)
@@ -247,7 +241,8 @@ func extractNativesFromLibraries(libDir, nativesDir string, E *events.EventEmitt
 	return nil
 }
 
-// loadVersionJSON loads and parses the version JSON file
+// loadVersionJSON loads, parses, and handles version inheritance for a specific version JSON file.
+// If the version inherits from a parent, their fields are merged (child overrides parent).
 func loadVersionJSON(gameDir, version string, E *events.EventEmitter) (*VersionJSON, error) {
 	versionJSONPath := filepath.Join(gameDir, "versions", version, version+".json")
 
@@ -261,17 +256,17 @@ func loadVersionJSON(gameDir, version string, E *events.EventEmitter) (*VersionJ
 		return nil, fmt.Errorf("failed to parse version JSON: %w", err)
 	}
 
-	// Check if this version inherits from another (Optifine, Forge, Fabric, etc.)
+	// Handle version inheritance (common for mod loaders like Forge, Fabric, OptiFine)
 	if versionJSON.InheritsFrom != "" {
 		E.Emit("version_inherits_from", versionJSON.InheritsFrom)
 
-		// Load parent version
+		// Load the parent version's JSON
 		parentJSON, err := loadVersionJSON(gameDir, versionJSON.InheritsFrom, E)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load parent version %s: %w", versionJSON.InheritsFrom, err)
 		}
 
-		// Merge: child overrides parent
+		// Merge fields: if the child's field is empty, inherit the parent's value
 		if versionJSON.MainClass == "" {
 			versionJSON.MainClass = parentJSON.MainClass
 		}
@@ -285,7 +280,7 @@ func loadVersionJSON(gameDir, version string, E *events.EventEmitter) (*VersionJ
 			versionJSON.Assets = parentJSON.Assets
 		}
 
-		// Merge libraries: parent first, then child (child can override)
+		// Merge libraries: Parent libraries come first, followed by child libraries.
 		mergedLibs := append([]struct {
 			Name      string `json:"name"`
 			Downloads struct {
@@ -322,31 +317,34 @@ func loadVersionJSON(gameDir, version string, E *events.EventEmitter) (*VersionJ
 	return &versionJSON, nil
 }
 
-// parseMinecraftArguments parses the minecraftArguments string and replaces placeholders
+// parseMinecraftArguments replaces placeholders in the `minecraftArguments` template string
+// with actual values and splits the result into a slice of command-line arguments.
 func parseMinecraftArguments(template string, replacements map[string]string) []string {
-	// Replace all placeholders
+	// Replace all placeholders like ${auth_player_name}
 	for key, value := range replacements {
 		template = strings.ReplaceAll(template, "${"+key+"}", value)
 	}
 
-	// Split into arguments
+	// Split the resulting string into arguments based on whitespace
 	args := strings.Fields(template)
 	return args
 }
 
-// buildClasspath builds the classpath from libraries
+// buildClasspath constructs the Java classpath string by finding the absolute paths
+// of all required and downloaded libraries, separated by the system's path list separator.
 func buildClasspath(gameDir, version string, versionJSON *VersionJSON, E *events.EventEmitter) string {
 	libDir := filepath.Join(gameDir, "libraries")
 	versionDir := filepath.Join(gameDir, "versions", version)
 	var classpathParts []string
 
-	// Add all libraries that match the current OS
+	// Add all required libraries (checking OS rules)
 	for _, lib := range versionJSON.Libraries {
 		if !shouldIncludeLibrary(lib.Rules) {
 			continue
 		}
 
 		if lib.Downloads.Artifact.Path != "" {
+			// Library with a defined artifact path (vanilla)
 			libPath := filepath.Join(libDir, filepath.FromSlash(lib.Downloads.Artifact.Path))
 			if _, err := os.Stat(libPath); err == nil {
 				classpathParts = append(classpathParts, libPath)
@@ -357,25 +355,23 @@ func buildClasspath(gameDir, version string, versionJSON *VersionJSON, E *events
 				})
 			}
 		} else if lib.Name != "" {
-			// Libraries without download info (Optifine, launchwrapper, etc.)
-			// These are usually in the version folder
-
-			// Parse library name: group:artifact:version
+			// Library without a download path (often used for modded launchers like Forge/Fabric)
+			// It requires checking alternative, non-standard path patterns.
 			parts := strings.Split(lib.Name, ":")
 			if len(parts) >= 3 {
 				group := parts[0]
 				artifact := parts[1]
 				version := parts[2]
 
-				// Try common patterns for modded libraries
+				// Check common paths for modded libraries
 				possiblePaths := []string{
-					// Pattern 1: versions/1.8.9-OptiFine_HD_U_M5/1.8.9-OptiFine_HD_U_M5.jar (Optifine itself)
+					// Pattern 1: `versionDir/artifact-version.jar` (e.g., Optifine or main mod loader JAR)
 					filepath.Join(versionDir, artifact+"-"+version+".jar"),
-					// Pattern 2: libraries/group/artifact/version/artifact-version.jar
+					// Pattern 2: `libraries/group/artifact/version/artifact-version.jar` (Maven standard)
 					filepath.Join(libDir, filepath.FromSlash(group), artifact, version, artifact+"-"+version+".jar"),
-					// Pattern 3: libraries/group/artifact/artifact-version.jar
+					// Pattern 3: `libraries/group/artifact/artifact-version.jar` (Less common variation)
 					filepath.Join(libDir, filepath.FromSlash(group), artifact, artifact+"-"+version+".jar"),
-					// Pattern 4: Check if it's in version folder with full name
+					// Pattern 4: `versionDir/lib.Name.jar`
 					filepath.Join(versionDir, lib.Name+".jar"),
 				}
 
@@ -399,21 +395,24 @@ func buildClasspath(gameDir, version string, versionJSON *VersionJSON, E *events
 		}
 	}
 
-	// Add version JAR
+	// Add the main version JAR to the classpath last
 	versionJar := filepath.Join(versionDir, version+".jar")
 	if _, err := os.Stat(versionJar); err == nil {
 		classpathParts = append(classpathParts, versionJar)
 	}
 
 	E.Emit("classpath_built", len(classpathParts))
+	// Join all parts with the OS-specific path list separator (e.g., ':' on Linux, ';' on Windows)
 	return strings.Join(classpathParts, string(os.PathListSeparator))
 }
 
-// PrepareCMD builds a Java command to launch Minecraft
+// PrepareCMD prepares the Java executable path and command-line arguments required to launch Minecraft.
+// It handles argument construction, memory settings, and finding the main class.
 func PrepareCMD(
 	username, accessToken, uuid, gameDir, version, javaPath, maxRam, minRam string,
 	E *events.EventEmitter,
 ) (string, []string, error) {
+	// Apply default values if not provided
 	if username == "" {
 		username = "Player"
 	}
@@ -427,7 +426,7 @@ func PrepareCMD(
 		minRam = "512M"
 	}
 	if accessToken == "" {
-		accessToken = "0"
+		accessToken = "0" // Placeholder for offline mode
 	}
 	if uuid == "" {
 		uuid = "00000000-0000-0000-0000-000000000000"
@@ -435,7 +434,7 @@ func PrepareCMD(
 
 	E.Emit("launch_preparation_start", version)
 
-	// Load version JSON
+	// Load and merge version JSON
 	versionJSON, err := loadVersionJSON(gameDir, version, E)
 	if err != nil {
 		E.Emit("error", err.Error())
@@ -447,7 +446,7 @@ func PrepareCMD(
 	versionDir := filepath.Join(gameDir, "versions", version)
 	versionJar := filepath.Join(versionDir, version+".jar")
 
-	// For modded versions (Fabric, Forge, etc.), use the parent JAR if child JAR doesn't exist
+	// Check for the client JAR. If a modded version is used, fall back to the parent version's JAR.
 	if _, err := os.Stat(versionJar); os.IsNotExist(err) {
 		if versionJSON.InheritsFrom != "" {
 			parentJar := filepath.Join(gameDir, "versions", versionJSON.InheritsFrom, versionJSON.InheritsFrom+".jar")
@@ -464,7 +463,7 @@ func PrepareCMD(
 		}
 	}
 
-	// Extract natives
+	// Extract natives from libraries
 	nativesDir := filepath.Join(versionDir, "natives")
 	libDir := filepath.Join(gameDir, "libraries")
 
@@ -473,37 +472,37 @@ func PrepareCMD(
 		return "", nil, fmt.Errorf("failed to extract natives: %w", err)
 	}
 
-	// Build classpath
+	// Build the classpath
 	E.Emit("building_classpath", libDir)
 	classpath := buildClasspath(gameDir, version, versionJSON, E)
 
-	// Absolute path for natives
+	// Get absolute path for natives directory, required for Java library path
 	absNativesDir, _ := filepath.Abs(nativesDir)
 
-	// Determine asset index
+	// Determine the asset index name
 	assetIndex := versionJSON.AssetIndex.ID
 	if versionJSON.Assets != "" {
 		assetIndex = versionJSON.Assets
 	}
 
-	// Build JVM arguments
+	// Build base JVM arguments
 	args := []string{
-		"-Xmx" + maxRam,
-		"-Xms" + minRam,
-		"-Djava.library.path=" + absNativesDir,
-		"-cp", classpath,
+		"-Xmx" + maxRam,                        // Maximum memory allocation
+		"-Xms" + minRam,                        // Initial memory allocation
+		"-Djava.library.path=" + absNativesDir, // Path to extracted native libraries
+		"-cp", classpath,                       // The constructed classpath
 	}
 
-	// Add main class from version JSON
+	// Append main class
 	mainClass := versionJSON.MainClass
 	if mainClass == "" {
-		mainClass = "net.minecraft.client.main.Main" // fallback
+		mainClass = "net.minecraft.client.main.Main" // Vanilla fallback
 	}
 	args = append(args, mainClass)
 
-	// Parse and add game arguments from version JSON
+	// Parse and append game arguments
 	if versionJSON.MinecraftArguments != "" {
-		// Old format (1.12.2 and below)
+		// Old argument format (pre-1.13)
 		replacements := map[string]string{
 			"auth_player_name":  username,
 			"version_name":      version,
@@ -518,10 +517,10 @@ func PrepareCMD(
 		gameArgs := parseMinecraftArguments(versionJSON.MinecraftArguments, replacements)
 		args = append(args, gameArgs...)
 	} else if len(versionJSON.Arguments.Game) > 0 {
-		// New format (1.13+)
-		// TODO: Implement new argument format parsing
-		// For now, fall back to manual arguments
-		gameArgs := []string{
+		// New argument format (1.13+) - Full implementation is complex; a manual fallback is used.
+		// NOTE: The full logic for the new format (1.13+) including rules for Game and JVM arguments is complex
+		// and is not fully implemented in the provided code (marked with TODO). The following is a manual fallback.
+		fallBackArgs := []string{
 			"--username", username,
 			"--version", version,
 			"--gameDir", gameDir,
@@ -531,10 +530,10 @@ func PrepareCMD(
 			"--accessToken", accessToken,
 			"--userType", "legacy",
 		}
-		args = append(args, gameArgs...)
+		args = append(args, fallBackArgs...)
 	} else {
-		// Manual fallback
-		gameArgs := []string{
+		// Generic manual fallback for any unparsed or missing argument format
+		fallBackArgs := []string{
 			"--username", username,
 			"--version", version,
 			"--gameDir", gameDir,
@@ -544,7 +543,7 @@ func PrepareCMD(
 			"--accessToken", accessToken,
 			"--userType", "legacy",
 		}
-		args = append(args, gameArgs...)
+		args = append(args, fallBackArgs...)
 	}
 
 	E.Emit("launch_preparation_complete", map[string]interface{}{
@@ -557,8 +556,9 @@ func PrepareCMD(
 	return javaPath, args, nil
 }
 
-// LaunchMinecraft launches Minecraft with the given parameters
+// LaunchMinecraft prepares the Java command and returns an *exec.Cmd ready to be started.
 func LaunchMinecraft(username, accessToken, uuid, gameDir, version, javaPath, maxRam, minRam string, E *events.EventEmitter) (*exec.Cmd, error) {
+	// Get the executable path and arguments
 	javaPath, args, err := PrepareCMD(username, accessToken, uuid, gameDir, version, javaPath, maxRam, minRam, E)
 	if err != nil {
 		return nil, err
@@ -566,7 +566,9 @@ func LaunchMinecraft(username, accessToken, uuid, gameDir, version, javaPath, ma
 
 	E.Emit("launching_game", version)
 
+	// Create the command object
 	cmd := exec.Command(javaPath, args...)
+	// Direct the child process's I/O to the launcher's I/O
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
