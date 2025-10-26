@@ -1,4 +1,4 @@
-#  Minecraft Launcher Core (Go)
+# Minecraft Launcher Core (Go)
 
 A **high-performance, modular, and thread-safe Go library** designed to abstract the complex logistics of downloading, managing, and launching various versions of the Minecraft client (Mojang API, libraries, assets, and mod loaders).
 
@@ -8,50 +8,102 @@ This core is engineered for reliability and concurrency, providing a robust foun
 
 ## 🎯 Architecture and Packages
 
-The library follows the **Single Responsibility Principle**, dividing its logic into four distinct, highly cohesive packages:
+The library follows the **Single Responsibility Principle**, dividing its logic into distinct, highly cohesive packages:
 
 | Package | Responsibility | Key Exported Functions | Design Focus |
 | :--- | :--- | :--- | :--- |
 | **`events`** | **Asynchronous Communication** | `New()`, `On()`, `Emit()` | Thread-safe, minimal overhead event signaling. |
 | **`downloader`** | **Vanilla Artifact Management** | `DownloadVersion()`, `DownloadFile()` | Handles manifest parsing, URL generation, and I/O operations for Mojang endpoints. |
 | **`fabric`** | **Mod Loader Integration** | `InstallFabric()` | Orchestrates metadata retrieval and library installation for Fabric modded versions. |
-| **`launcher`** | **Command Preparation & Execution** | `PrepareCMD()`, `LaunchMinecraft()`, `buildClasspath()` | Manages version profiles, native extraction, argument substitution, and Java command construction. |
+| **`launcher`** | **Command Preparation & Execution** | `PrepareCMD()`, `LaunchMinecraft()`, `buildClasspath()` | Manages version profiles, native extraction, argument substitution, and JVM command construction. |
+| **`utils`** | **General Launcher Utilities** | `GetMCDir()`, `SetMCDir()`, `GetAllVanillaMCVersions()` | Provides file handling, version fetching, downloads, and backups. |
+
+> You can add more packages here, e.g., `forge` for Forge mod support or `server` for lightweight launcher-side server management.
 
 ---
 
-## Core Logic Flow
+## 💡 Core Logic Flow
 
-The launch process involves two main phases: **Installation** (idempotent setup) and **Execution** (runtime command generation).
+The launch process is split into **Installation** and **Execution** phases.
 
 ### Phase 1: Installation (`downloader` / `fabric`)
 
-This phase ensures all required files exist in the correct locations within the `.minecraft` directory (`mcDir`).
+Ensures all required files exist in the correct `.minecraft` structure:
 
-1.  **Version Profile:** Fetch the primary version manifest and the target version's detailed JSON.
-2.  **Inheritance Handling:** If a modded version is requested (`fabric`), the base vanilla version is installed first.
-3.  **Artifact Download:** Recursively fetch the client JAR, all required libraries, and all game assets (textures, sounds, etc.).
-4.  **Local Metadata:** The final, **merged launch JSON** (including mod loader libraries and main class overrides) is saved to the local `versions/<ID>/<ID>.json` file.
+1. **Version Profile:** Fetch the primary version manifest and the target version’s JSON.  
+2. **Inheritance Handling:** For modded versions (Fabric), ensure base vanilla version is installed first.  
+3. **Artifact Download:** Recursively fetch client JAR, required libraries, and assets.  
+4. **Local Metadata:** Save a merged launch JSON (`versions/<ID>/<ID>.json`) with all mod loader overrides applied.  
 
 ### Phase 2: Execution (`launcher`)
 
-This phase builds the exact command required to start the JVM.
+Constructs the final Java command to launch Minecraft:
 
-1.  **Load & Merge:** `launcher.loadVersionJSON` reads the final local JSON, ensuring fields (like `mainClass` and `libraries`) are correctly combined if inheritance was used (e.g., Fabric over vanilla).
-2.  **Native Extraction:** `launcher.extractNativesFromLibraries` unzips all platform-specific dynamic libraries (`.dll`, `.so`, `.dylib`) from the downloaded JARs into a temporary `natives` folder.
-3.  **Classpath Construction:** `launcher.buildClasspath` creates the full, system-separated string of every dependency JAR required by the JVM.
-4.  **Argument Substitution:** The function `launcher.PrepareCMD` handles token replacement for both **old** (`minecraftArguments`) and **new** (`arguments` object) argument formats, substituting variables like `${auth_player_name}` and `${game_directory}`.
-5.  **Command Finalization:** A complete `java -Xmx... -Djava.library.path=... -cp ... MainClass --gameDir ...` command is returned as a ready-to-run `*exec.Cmd`.
+1. **Load & Merge:** Read local JSON, ensure fields (`mainClass`, `libraries`) are merged if needed.  
+2. **Native Extraction:** Extract platform-specific libraries (`.dll`, `.so`, `.dylib`) into a temporary `natives` folder.  
+3. **Classpath Construction:** Combine every library into a JVM-compatible classpath string.  
+4. **Argument Substitution:** Replace variables (`${auth_player_name}`, `${game_directory}`, etc.) in old/new argument formats.  
+5. **Command Finalization:** Return a fully-prepared `*exec.Cmd` ready to launch Minecraft.
 
 ---
 
-## Eventing System (`events`)
+## ⚡ Event System (`events`)
 
-The **`EventEmitter`** provides a clean, non-blocking interface for the core logic to communicate status and errors back to the UI or logging layer.
+`EventEmitter` provides a **non-blocking interface** to communicate status and errors to the UI or logs:
 
 | Event Name | Purpose | Example Data (type) | Origin |
 | :--- | :--- | :--- | :--- |
-| `file_downloaded` | Successful download of any artifact. | `/path/to/file.jar` (`string`) | `downloader` |
-| `library_missing` | Required dependency was not found locally. | `{name: "guava", path: "..."}` (`map`) | `launcher` |
-| `natives_extracted` | Native extraction complete and verified. | `12` (count) (`int`) | `launcher` |
-| `version_merged` | Confirms successful merging of parent/child profiles. | `{child: "fabric-...", parent: "1.20.1"}` (`map`) | `launcher` |
-| `error` | Reports any non-recoverable error. | `Failed to fetch manifest: EOF` (`string`) | All |
+| `file_downloaded` | A file or library was successfully downloaded. | `/path/to/file.jar` (`string`) | `downloader` |
+| `library_missing` | A required dependency was not found locally. | `{name: "guava", path: "..."}` (`map`) | `launcher` |
+| `natives_extracted` | Natives were extracted and verified. | `12` (`int`) | `launcher` |
+| `version_merged` | Confirms parent/child JSON merging. | `{child: "fabric-1.20.1", parent: "1.20.1"}` (`map`) | `launcher` |
+| `error` | Reports unrecoverable errors. | `Failed to fetch manifest: EOF` (`string`) | All |
+
+> You can extend the event system with custom events for mod downloads, game logging, or UI updates.
+
+---
+
+## 🔧 Utilities (`utils`)
+
+Utility functions for the launcher:
+
+- `GetMCDir()` / `SetMCDir(dir string)` – Get/set custom Minecraft directory.  
+- `GetAllVanillaMCVersions()` – Fetch all official Mojang versions.  
+- `GetLatestMCVersion()` – Fetch the latest release.  
+- `DownloadFile(url, dest)` – Download any file from the web.  
+- `BackupFile(src, backup)` – Backup files safely.  
+
+> This package is fully launcher-independent and can be extended to handle assets, configs, or lightweight server info.
+
+---
+
+## 📦 Extending the Core
+
+You can extend the launcher core in multiple ways:
+
+1. **Add Mod Loader Packages**  
+   - `forge`, `quilt`, etc.  
+2. **Add Logging/Telemetry**  
+   - Emit events for detailed runtime monitoring.  
+3. **Integrate Custom UI**  
+   - Wrap `PrepareCMD()` and event handling for GUI launchers.  
+4. **Asset Management**  
+   - Preload textures, sounds, or mod files efficiently.  
+5. **Server Integration (optional)**  
+   - Track saved servers or allow lightweight server launches from the launcher.  
+
+> Keep each package **single-responsibility**, thread-safe, and event-driven for maximum modularity.
+
+---
+
+## ⚖️ License
+
+## MIT license
+
+---
+
+## 📝 Notes
+
+- All network operations are **thread-safe**.  
+- The library avoids writing anything to the user’s `.minecraft` folder unless explicitly requested.  
+- `utils` and `downloader` are fully decoupled and can be reused in other Go projects.  
