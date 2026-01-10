@@ -1,4 +1,6 @@
 # Minecraft Launcher Core (Go)
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Furixen-org%2Fminecraft-launcher-core.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Furixen-org%2Fminecraft-launcher-core?ref=badge_shield)
+
 
 A **high-performance, modular, and thread-safe Go library** designed to abstract the complex logistics of downloading, managing, and launching various versions of the Minecraft client (Mojang API, libraries, assets, and mod loaders).
 
@@ -98,6 +100,9 @@ You can extend the launcher core in multiple ways:
 
 ## ⚖️ License
 
+
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Furixen-org%2Fminecraft-launcher-core.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Furixen-org%2Fminecraft-launcher-core?ref=badge_large)
+
 ## MIT license
 
 ---
@@ -106,4 +111,4 @@ You can extend the launcher core in multiple ways:
 
 - All network operations are **thread-safe**.  
 - The library avoids writing anything to the user’s `.minecraft` folder unless explicitly requested.  
-- `utils` and `downloader` are fully decoupled and can be reused in other Go projects.  
+- `utils` and `downloader` are fully decoupled and can be reused in other Go projects.
